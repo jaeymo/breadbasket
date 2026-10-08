@@ -1,0 +1,79 @@
+name: Breadbasket
+
+on:
+  issues:
+    types: [labeled, unlabeled, closed, reopened, deleted]
+  workflow_dispatch: # manual "resync" button
+
+# Only one rebuild at a time so rapid label changes can't race each other
+concurrency:
+  group: breadbasket
+  cancel-in-progress: false
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const LABEL = "breadbasket";
+            const BASKET_TITLE = "Breadbasket";
+            const branch = context.payload.repository.default_branch;
+
+            // ?raw=true works for both public and private repos
+            const img = (file) =>
+              `https://github.com/${owner}/${repo}/blob/${branch}/assets/${file}?raw=true`;
+
+            // 1. Find the basket issue itself
+            const openIssues = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: "open", per_page: 100,
+            });
+            const basket = openIssues.find(
+              (i) => !i.pull_request && i.title === BASKET_TITLE
+            );
+            if (!basket) {
+              core.warning(`No open issue titled "${BASKET_TITLE}" found.`);
+              return;
+            }
+
+            // 2. Collect open issues labeled "breadbasket" (not PRs, not the basket)
+            const items = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, labels: LABEL, state: "open",
+              sort: "created", direction: "asc", per_page: 100,
+            });
+            const numbers = items
+              .filter((i) => !i.pull_request && i.number !== basket.number)
+              .map((i) => i.number);
+
+            // 3. Build the body
+            let body;
+            if (numbers.length > 0) {
+              body = [
+                "Welcome to the bread basket, grab something to do and get to work!",
+                "",
+                `<img width="489.6" height="326.4" alt="Lots of bread" src="${img("LotsOfBreadHappy.jpg")}" />`,
+                "",
+                ...numbers.map((n) => `- #${n}`),
+              ].join("\n");
+            } else {
+              body = [
+                "The bread basket is empty... label an issue `breadbasket` to fill it back up!",
+                "",
+                `<img width="489.6" height="326.4" alt="No bread" src="${img("NoBreadSad.png")}" />`,
+              ].join("\n");
+            }
+
+            // 4. Only write if something changed
+            if ((basket.body ?? "").trim() === body.trim()) {
+              core.info("Basket already up to date.");
+              return;
+            }
+            await github.rest.issues.update({
+              owner, repo, issue_number: basket.number, body,
+            });
